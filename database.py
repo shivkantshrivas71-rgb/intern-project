@@ -1,11 +1,13 @@
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-
+#from pymongo import MongoClient
 load_dotenv()
 
-MONGO_URI = os.environ.get("MONGO_URI")
-DB_NAME = os.environ.get("DB_NAME")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+DB_NAME = os.getenv("DB_NAME", "fastapi_auth_db")
+#client = MongoClient(mongo_uri)
+
 
 client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
