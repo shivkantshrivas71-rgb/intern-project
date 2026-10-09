@@ -46,3 +46,29 @@ class VerifyOTPRequest(BaseModel):
     email: str = Field(..., examples=["user@example.com"])
     otp: str = Field(..., examples=["123456"])
     new_password: str = Field(..., examples=["NewPassword123"])
+
+class SmartLoginRequest(BaseModel):
+    """
+    Smart Login/Register:
+    - Agar user already registered hai → password se login kar lega
+    - Agar user naya hai → username bhi dena hoga, account bana dega aur login kar dega
+    """
+    email: str = Field(..., examples=["user@example.com"])
+    password: str = Field(..., examples=["StrongPassword123"])
+    username: str | None = Field(
+        None,
+        description="Sirf tab zaroori hai jab aap naya account bana rahe hain",
+        examples=["john_doe"]
+    )
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v):
+        if not re.match(r"[^@]+@[^@]+\.[^@]+", v):
+            raise ValueError("Invalid email format")
+        return v
+
+class SmartLoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    is_new_user: bool = Field(..., description="True = naya account bana, False = purani email se login hua")

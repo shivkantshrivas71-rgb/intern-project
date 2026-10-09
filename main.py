@@ -4,6 +4,7 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from bson import ObjectId
@@ -14,7 +15,7 @@ load_dotenv()
 # Import functions and configurations from other files
 from database import users_collection, create_db_indexes
 from security import hash_password, verify_password, create_access_token, verify_token
-from schemas import UserCreate, UserUpdate, UserResponse, Token, UserLogin, ForgotPasswordRequest, VerifyOTPRequest
+from schemas import UserCreate, UserUpdate, UserResponse, Token, UserLogin, ForgotPasswordRequest, VerifyOTPRequest, SmartLoginRequest, SmartLoginResponse
 from middleware import setup_middlewares
 
 # Email config from .env
@@ -90,22 +91,28 @@ async def register(user_data: UserCreate):
     if await users_collection.find_one({"username": user_data.username}):
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    # Step 2: Check if email already exists
-    if await users_collection.find_one({"email": user_data.email}):
-        raise HTTPException(status_code=400, detail="Email already registered")
-        
-    # Step 3: Prepare user data and encrypt the password
+    # Step 2: Agar email already registered hai to seedha login kar do
+    existing_user = await users_collection.find_one({"email": user_data.email})
+    if existing_user:
+        # Password check karo
+        if not verify_password(user_data.password, existing_user["password"]):
+            raise HTTPException(status_code=401, detail="Email already registered hai. Sahi password enter karein.")
+        # Sahi password → seedha login token return karo
+        token = create_access_token(data={"sub": existing_user["username"]})
+        await users_collection.update_one(
+            {"_id": existing_user["_id"]},
+            {"$set": {"access_token": token}}
+        )
+        return JSONResponse(content={"access_token": token, "token_type": "bearer", "message": "Already registered — login successful"})
+
+    # Step 3: Naya user — account banao
     user_doc = {
         "username": user_data.username,
         "email": user_data.email,
         "password": hash_password(user_data.password),
         "created_at": datetime.datetime.now(datetime.timezone.utc)
     }
-    
-    # Step 4: Save the new user in the database
     await users_collection.insert_one(user_doc)
-    
-    # Step 5: Return success response
     return {"username": user_doc["username"], "email": user_doc["email"], "created_at": user_doc["created_at"]}
 
 @app.post("/login", response_model=Token)
@@ -157,6 +164,69 @@ async def update_my_profile(user_update: UserUpdate, current_user: dict = Depend
 async def delete_my_account(current_user: dict = Depends(get_current_user)):
     await users_collection.delete_one({"_id": current_user["_id"]})
     return {"message": "Account deleted successfully"}
+
+
+@app.post("/smart-login", response_model=SmartLoginResponse)
+async def smart_login(data: SmartLoginRequest):
+    """
+    Smart Login/Register Endpoint:
+
+    - **Agar email already registered hai**: seedha login hoga apni purani email + password se.
+      (Username dene ki zaroorat nahi)
+    - **Agar email nai hai (naya user)**: username bhi dena hoga — account banake login ho jayega.
+    """
+    # Step 1: Check karo — kya ye email already registered hai?
+    existing_user = await users_collection.find_one({"email": data.email})
+
+    if existing_user:
+        # ── PURANA USER: seedha login karo ──
+        if not verify_password(data.password, existing_user["password"]):
+            raise HTTPException(
+                status_code=401,
+                detail="Password galat hai. Apna sahi password enter karein."
+            )
+
+        # Token banao aur save karo
+        token = create_access_token(data={"sub": existing_user["username"]})
+        await users_collection.update_one(
+            {"_id": existing_user["_id"]},
+            {"$set": {"access_token": token}}
+        )
+
+        return {"access_token": token, "token_type": "bearer", "is_new_user": False}
+
+    else:
+        # ── NAYA USER: register karke login karo ──
+        if not data.username:
+            raise HTTPException(
+                status_code=400,
+                detail="Aap pehle registered nahi hain. Naya account banane ke liye 'username' bhi zaroor dein."
+            )
+
+        # Username already exist to nahi karta?
+        if await users_collection.find_one({"username": data.username}):
+            raise HTTPException(
+                status_code=400,
+                detail="Ye username pehle se kisi ne le rakha hai. Koi aur username choose karein."
+            )
+
+        # Naya user document banao
+        user_doc = {
+            "username": data.username,
+            "email": data.email,
+            "password": hash_password(data.password),
+            "created_at": datetime.datetime.now(datetime.timezone.utc)
+        }
+        await users_collection.insert_one(user_doc)
+
+        # Token banao aur save karo
+        token = create_access_token(data={"sub": data.username})
+        await users_collection.update_one(
+            {"email": data.email},
+            {"$set": {"access_token": token}}
+        )
+
+        return {"access_token": token, "token_type": "bearer", "is_new_user": True}
 
 
 # ==========================================
