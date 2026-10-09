@@ -142,20 +142,31 @@ async def get_my_profile(current_user: dict = Depends(get_current_user)):
 @app.put("/users/me", response_model=UserResponse)
 async def update_my_profile(user_update: UserUpdate, current_user: dict = Depends(get_current_user)):
     update_data = {}
+
+    # Username update — check karo koi aur use nahi kar raha
     if user_update.username:
         if await users_collection.find_one({"username": user_update.username, "_id": {"$ne": current_user["_id"]}}):
             raise HTTPException(status_code=400, detail="Username already taken")
         update_data["username"] = user_update.username
+
+    # Email update — check karo koi aur use nahi kar raha
     if user_update.email:
         if await users_collection.find_one({"email": user_update.email, "_id": {"$ne": current_user["_id"]}}):
             raise HTTPException(status_code=400, detail="Email already taken")
         update_data["email"] = user_update.email
+
+    # Password update
     if user_update.password:
         update_data["password"] = hash_password(user_update.password)
-        
+
     if not update_data:
         raise HTTPException(status_code=400, detail="No data provided to update")
-        
+
+    # Agar username badla hai to naya token bhi banao (warna purana token invalid ho jayega)
+    new_username = update_data.get("username", current_user["username"])
+    new_token = create_access_token(data={"sub": new_username})
+    update_data["access_token"] = new_token
+
     await users_collection.update_one({"_id": current_user["_id"]}, {"$set": update_data})
     updated_user = await users_collection.find_one({"_id": current_user["_id"]})
     return {"username": updated_user["username"], "email": updated_user.get("email"), "created_at": updated_user["created_at"]}
