@@ -1,16 +1,18 @@
 import asyncio
-import os
-from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
+import os
 
 load_dotenv()
+uri = os.getenv("MONGO_URI")
+print("URI:", uri)
 
-async def main():
+async def test():
     try:
-        client = AsyncIOMotorClient(os.getenv('MONGO_URI'), serverSelectionTimeoutMS=5000)
-        info = await client.server_info()
-        print("Connected:", info)
+        client = AsyncIOMotorClient(uri)
+        await client.admin.command('ping')
+        print("Success!")
     except Exception as e:
         print("Error:", e)
 
-asyncio.run(main())
+asyncio.run(test())
