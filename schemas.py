@@ -3,17 +3,25 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 class UserCreate(BaseModel):
-    username: str = Field(..., examples=["please enter your name"])
-    password: str = Field(..., examples=["please enter your password"])
+    username: str = Field(..., examples=["john_doe"])
+    email: str = Field(..., examples=["user@example.com"])
+    password: str = Field(..., examples=["StrongPassword123"])
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v):
+        if not re.match(r"[^@]+@[^@]+\.[^@]+", v):
+            raise ValueError("Invalid email format")
+        return v
 
 class UserLogin(BaseModel):
-    username_or_email: str = Field(..., description="Enter your username or email")
-    password: str = Field(..., examples=["please enter your password"])
+    email: str = Field(..., description="Enter your registered email")
+    password: str = Field(..., examples=["StrongPassword123"])
 
 class UserUpdate(BaseModel):
-    username: str | None = Field(None, examples=["please enter your name"])
+    username: str | None = Field(None, examples=["new_username"])
     email: str | None = Field(None, examples=["user@example.com"])
-    password: str | None = Field(None, examples=["please enter your password"])
+    password: str | None = Field(None, examples=["NewPassword123"])
 
     @field_validator('email')
     @classmethod
@@ -30,3 +38,11 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., examples=["user@example.com"])
+
+class VerifyOTPRequest(BaseModel):
+    email: str = Field(..., examples=["user@example.com"])
+    otp: str = Field(..., examples=["123456"])
+    new_password: str = Field(..., examples=["NewPassword123"])
