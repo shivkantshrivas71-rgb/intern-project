@@ -15,7 +15,7 @@ load_dotenv()
 # Import functions and configurations from other files
 from database import users_collection, create_db_indexes
 from security import hash_password, verify_password, create_access_token, verify_token
-from schemas import UserCreate, UserUpdate, UserResponse, Token, UserLogin, ForgotPasswordRequest, VerifyOTPRequest, SmartLoginRequest, SmartLoginResponse
+from schemas import UserCreate, UserUpdate, UserResponse, Token, UserLogin, ForgotPasswordRequest, VerifyOTPRequest, SmartLoginRequest, SmartLoginResponse, AdminUserResponse, RoleUpdateRequest
 from middleware import setup_middlewares
 
 # Email config from .env
@@ -81,6 +81,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         
     return user
 
+async def get_admin_user(current_user: dict = Depends(get_current_user)):
+    """Check karo ki logged-in user Admin hai ya nahi."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied! Sirf Admins hi ye endpoint use kar sakte hain."
+        )
+    return current_user
+
 
 # ==========================================
 # 2. USER ENDPOINTS (Register, Login, Update Profile)
@@ -110,6 +119,7 @@ async def register(user_data: UserCreate):
         "username": user_data.username,
         "email": user_data.email,
         "password": hash_password(user_data.password),
+        "role": "user",  # Default role
         "created_at": datetime.datetime.now(datetime.timezone.utc)
     }
     await users_collection.insert_one(user_doc)
@@ -226,6 +236,7 @@ async def smart_login(data: SmartLoginRequest):
             "username": data.username,
             "email": data.email,
             "password": hash_password(data.password),
+            "role": "user",  # Default role
             "created_at": datetime.datetime.now(datetime.timezone.utc)
         }
         await users_collection.insert_one(user_doc)
@@ -301,3 +312,64 @@ async def reset_password(request: VerifyOTPRequest):
     )
 
     return {"message": "Password reset successfully! Please login with your new password."}
+
+
+# ==========================================
+# 4. ADMIN ENDPOINTS (Admin Only Access)
+# ==========================================
+
+@app.get("/admin/stats")
+async def get_stats(admin: dict = Depends(get_admin_user)):
+    """Total users aur admins ki count dikhao."""
+    total_users = await users_collection.count_documents({"role": "user"})
+    total_admins = await users_collection.count_documents({"role": "admin"})
+    total_all = await users_collection.count_documents({})
+    return {
+        "total_accounts": total_all,
+        "total_users": total_users,
+        "total_admins": total_admins
+    }
+
+@app.get("/admin/users", response_model=list[AdminUserResponse])
+async def get_all_users(admin: dict = Depends(get_admin_user)):
+    """Saare registered users ki list (Admin only)."""
+    users = []
+    async for user in users_collection.find({}, {"password": 0, "access_token": 0, "reset_otp": 0, "otp_expiry": 0}):
+        users.append({
+            "username": user["username"],
+            "email": user.get("email"),
+            "role": user.get("role", "user"),
+            "created_at": user["created_at"]
+        })
+    return users
+
+@app.put("/admin/users/{username}/role")
+async def update_user_role(username: str, role_data: RoleUpdateRequest, admin: dict = Depends(get_admin_user)):
+    """Kisi bhi user ka role change karo — 'admin' ya 'user' (Admin only)."""
+    if role_data.role not in ["admin", "user"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Sirf 'admin' ya 'user' allowed hai.")
+
+    user = await users_collection.find_one({"username": username})
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' nahi mila.")
+
+    # Admin apna role khud nahi badal sakta
+    if user["username"] == admin["username"]:
+        raise HTTPException(status_code=400, detail="Aap apna khud ka role nahi badal sakte.")
+
+    await users_collection.update_one({"username": username}, {"$set": {"role": role_data.role}})
+    return {"message": f"User '{username}' ka role successfully '{role_data.role}' kar diya gaya."}
+
+@app.delete("/admin/users/{username}")
+async def admin_delete_user(username: str, admin: dict = Depends(get_admin_user)):
+    """Kisi bhi user ka account delete karo (Admin only)."""
+    user = await users_collection.find_one({"username": username})
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' nahi mila.")
+
+    # Admin apna account khud delete nahi kar sakta
+    if user["username"] == admin["username"]:
+        raise HTTPException(status_code=400, detail="Aap apna khud ka account delete nahi kar sakte.")
+
+    await users_collection.delete_one({"username": username})
+    return {"message": f"User '{username}' ka account successfully delete kar diya gaya."}

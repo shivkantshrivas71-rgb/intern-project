@@ -72,3 +72,18 @@ class SmartLoginResponse(BaseModel):
     access_token: str
     token_type: str
     is_new_user: bool = Field(..., description="True = naya account bana, False = purani email se login hua")
+
+# ==========================================
+# ADMIN SCHEMAS
+# ==========================================
+
+class AdminUserResponse(BaseModel):
+    """Admin ke liye full user details (role ke saath)"""
+    username: str
+    email: str | None = None
+    role: str = "user"
+    created_at: datetime.datetime
+
+class RoleUpdateRequest(BaseModel):
+    """Admin kisi bhi user ka role change kar sakta hai"""
+    role: str = Field(..., examples=["admin", "user"], description="New role: 'admin' ya 'user'")
