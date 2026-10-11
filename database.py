@@ -1,16 +1,31 @@
-import os
+"""
+database.py — MongoDB Motor Driver Connection
+Centralized database connection and collection references for the Master API.
+"""
 from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
+from config import settings
 
-load_dotenv()
+# ── Client & DB ──────────────────────────────────────────────────────────────
+client = AsyncIOMotorClient(settings.MONGO_URI)
+db = client[settings.DB_NAME]
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-DB_NAME = os.getenv("DB_NAME", "fastapi_auth_db")
-
-client = AsyncIOMotorClient(MONGO_URI)
-db = client[DB_NAME]
+# ── Collections ──────────────────────────────────────────────────────────────
 users_collection = db["users"]
+agents_collection = db["agents"]
 
-async def create_db_indexes():
+
+async def create_db_indexes() -> None:
+    """
+    Create all required database indexes on application startup.
+    If an index already exists, MongoDB will silently ignore the duplicate request.
+    """
+    # Users
     await users_collection.create_index("username", unique=True)
-    print("Database Connected and Indexes Verified!")
+    await users_collection.create_index("email", unique=True, sparse=True)
+
+    # Agents
+    await agents_collection.create_index("phone", unique=True)
+
+    print(
+        f"[DB] Connected to '{settings.DB_NAME}' — all indexes verified successfully."
+    )
