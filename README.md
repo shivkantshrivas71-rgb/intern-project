@@ -1,6 +1,8 @@
 # Master API Gateway
 
-**Production-ready FastAPI + MongoDB backend with modular Master API architecture.**
+**Production-ready FastAPI + MongoDB backend with centralized Master API architecture.**
+
+All endpoints are fully defined in `main.py` with Pydantic validation, bcrypt password hashing, JWT authentication, sliding-window rate limiting, token blacklisting, and image uploads.
 
 ---
 
@@ -8,24 +10,28 @@
 
 ```
 project.1authe/
-├── main.py              # 🚀 Master Gateway (Central Entry Point)
+├── main.py              # 🚀 Master Gateway (Centralized Entry Point & All Endpoints)
 ├── config.py            # ⚙️  Centralized Settings (.env loader)
-├── database.py          # 🗄️  MongoDB Motor Driver + Collections
-├── security.py          # 🔐 JWT + bcrypt Password Utilities
+├── database.py          # 🗄️  MongoDB Motor Driver + Collections + Indexes
+├── security.py          # 🔐 JWT + bcrypt Password Utilities + Token Blacklisting
 ├── middleware.py        # 🛡️  CORS + Security Headers
 │
 ├── core/
-│   └── helpers.py       # 🔧 PyObjectId (ObjectId→JSON) + serialize utils
+│   ├── helpers.py       # 🔧 PyObjectId (ObjectId→JSON) + serialize utils
+│   └── rate_limiter.py  # ⏱️  Sliding-Window Rate Limiter (5 attempts/min)
 │
-└── modules/
-    ├── auth/
-    │   └── auth.py      # 🔑 JWT Dependency Layer (get_current_user, get_admin_user)
-    ├── users/
-    │   ├── schemas.py   # 📋 Pydantic v2 User Schemas
-    │   └── routes.py    # 🛣️  User + Admin Endpoints
-    └── agents/
-        ├── schemas.py   # 📋 Pydantic v2 Agent Schemas
-        └── routes.py    # 🛣️  Agent CRUD Endpoints
+├── modules/
+│   ├── auth/
+│   │   └── auth.py      # 🔑 JWT Dependencies (get_current_user, get_admin_user)
+│   ├── users/
+│   │   ├── schemas.py   # 📋 Pydantic v2 User Schemas
+│   │   └── routes.py    # 🛣️  User Router Reference
+│   └── agents/
+│       ├── schemas.py   # 📋 Pydantic v2 Agent Schemas
+│       └── routes.py    # 🛣️  Agent Router Reference
+│
+└── uploads/
+    └── profile_photos/  # 🖼️  User Profile Photo Storage
 ```
 
 ---
@@ -43,49 +49,78 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-**API Docs:** http://localhost:8000/docs  
-**Health Check:** http://localhost:8000/health
+- **Swagger UI (Interactive Docs):** http://localhost:8000/docs  
+- **ReDoc:** http://localhost:8000/redoc  
+- **Health Check:** http://localhost:8000/health  
 
 ---
 
-## API Modules
+## Complete API Endpoints Table
 
-### Auth & Users (`/`)
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/register` | ❌ | Register new user (username, email, mobile_number, gender, password) |
-| POST | `/login` | ❌ | Login → JWT token (Rate limited: 5 attempts/min) |
-| POST | `/logout` | ✅ | Logout → blacklists token permanently |
-| POST | `/refresh-token` | ✅ | Renew token → revokes and blacklists old token |
-| GET | `/users/me` | ✅ | Get my profile (includes `profile_photo`) |
-| PUT | `/users/me` | ✅ | Update my profile |
-| DELETE | `/users/me` | ✅ | Delete my account |
-| POST | `/users/me/profile-photo` | ✅ | Upload/update profile photo (JPEG, PNG, WEBP, GIF, max 5MB) |
-| DELETE | `/users/me/profile-photo` | ✅ | Delete my profile photo |
-| POST | `/forgot-password` | ❌ | Request OTP |
-| POST | `/reset-password` | ❌ | Reset via OTP |
-| GET | `/admin/stats` | 👑 Admin | User statistics |
-| GET | `/admin/users` | 👑 Admin | All users list |
-| PUT | `/admin/users/{username}/role` | 👑 Admin | Change user role |
-| DELETE | `/admin/users/{username}` | 👑 Admin | Delete user |
+### 1. Authentication Endpoints
 
-### Agents (`/agents`)
+| Method | Endpoint | Auth | Request Body / Params | Detailed Description |
+|:---:|:---|:---:|:---|:---|
+| `POST` | `/register` | ❌ Public | JSON: `username`, `email`, `password`, `mobile_number`, `gender` | Validates format & uniqueness. If email exists and password matches, logs in automatically. Otherwise creates new account with hashed password. |
+| `POST` | `/login` | ❌ Public | JSON: `email`, `password` | Authenticates credentials; rate-limited to **5 attempts per minute** per client IP. Resets attempt counter on success and returns JWT access token. |
+| `POST` | `/logout` | 🔑 Bearer Token | Headers: `Authorization: Bearer <token>` | Permanently revokes and blacklists active JWT token so it cannot be reused. Clears session in database. |
+| `POST` | `/refresh-token` | 🔑 Bearer Token | Headers: `Authorization: Bearer <token>` | Immediately invalidates and blacklists the old token, then issues a fresh new JWT access token. |
+| `POST` | `/forgot-password` | ❌ Public | JSON: `email` | Checks if account exists, generates a secure 6-digit OTP valid for 10 minutes, and sends it via SMTP email. |
+| `POST` | `/reset-password` | ❌ Public | JSON: `email`, `otp`, `new_password` | Verifies the OTP and expiration window, securely updates password with bcrypt hashing, and clears the OTP. |
+
+---
+
+### 2. User Profile Endpoints
+
+| Method | Endpoint | Auth | Request Body / Params | Detailed Description |
+|:---:|:---|:---:|:---|:---|
+| `GET` | `/users/me` | 🔑 Bearer Token | Headers: `Authorization: Bearer <token>` | Returns full profile of logged-in user (including username, email, mobile, gender, profile photo URL) without sensitive secrets. |
+| `PUT` | `/users/me` | 🔑 Bearer Token | JSON (Optional): `username`, `email`, `mobile_number`, `gender`, `password` | Updates authenticated user's profile with conflict validation. If username changes, the previous token is revoked and a new token is issued. |
+| `POST` | `/users/me/profile-photo` | 🔑 Bearer Token | `multipart/form-data`: `file: UploadFile` | Uploads/updates profile picture (JPEG, PNG, WEBP, GIF, max 5MB). Deletes previous photo file from disk and updates URL in database. |
+| `DELETE` | `/users/me/profile-photo` | 🔑 Bearer Token | Headers: `Authorization: Bearer <token>` | Removes profile photo file from disk and unsets the `profile_photo` field in the user document. |
+| `DELETE` | `/users/me` | 🔑 Bearer Token | Headers: `Authorization: Bearer <token>` | Permanently deletes the authenticated user's own account and associated uploaded files. |
+
+---
+
+### 3. Administrator Endpoints
+
+| Method | Endpoint | Auth | Request Body / Params | Detailed Description |
+|:---:|:---|:---:|:---|:---|
+| `GET` | `/admin/stats` | 👑 Admin Only | Headers: `Authorization: Bearer <admin_token>` | Returns real-time platform statistics: total registered accounts, standard users count, and admin accounts count. |
+| `GET` | `/admin/users` | 👑 Admin Only | Headers: `Authorization: Bearer <admin_token>` | Lists all registered users across the system (excluding passwords, tokens, and OTP secrets). |
+| `PUT` | `/admin/users/{username}/role` | 👑 Admin Only | Path: `username`, JSON: `role` ("admin" or "user") | Updates specified user's role. Admins cannot alter their own role to prevent lockout. |
+| `DELETE` | `/admin/users/{username}` | 👑 Admin Only | Path: `username` | Permanently deletes any user account. Admins cannot delete their own account through this endpoint. |
+
+---
+
+### 4. Agent Operations Endpoints
+
+| Method | Endpoint | Auth | Request Body / Params | Detailed Description |
+|:---:|:---|:---:|:---|:---|
+| `POST` | `/agents/` | 🔑 Bearer Token | JSON: `name`, `phone`, `email` (opt), `status` (active/inactive/suspended), `region`, `department`, `notes` | Creates a new operational agent record. Validates that the phone number is unique across all agents. |
+| `GET` | `/agents/` | 🔑 Bearer Token | Query: `page` (default 1), `page_size` (default 10), `status` (opt), `search` (opt) | Returns a paginated list of operational agents with status filtering and name/phone search. |
+| `GET` | `/agents/{agent_id}` | 🔑 Bearer Token | Path: `agent_id` (MongoDB ObjectId) | Fetches complete record details of a single agent by ID. Returns 404/422 if invalid or not found. |
+| `PUT` | `/agents/{agent_id}` | 🔑 Bearer Token | Path: `agent_id`, JSON (Optional fields) | Updates agent record. Validates unique phone number if modified. |
+| `DELETE` | `/agents/{agent_id}` | 👑 Admin Only | Path: `agent_id` | Permanently deletes the specified operational agent record. Restricted to admins. |
+| `PATCH` | `/agents/bulk/status` | 👑 Admin Only | JSON: `agent_ids: list[str]`, Query: `new_status` | Atomically updates the operational status of multiple agents in a single request. Restricted to admins. |
+
+---
+
+### 5. System & Health Endpoints
+
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/agents/` | ✅ | Create agent |
-| GET | `/agents/` | ✅ | List agents (paginated, filterable) |
-| GET | `/agents/{id}` | ✅ | Get single agent |
-| PUT | `/agents/{id}` | ✅ | Update agent |
-| DELETE | `/agents/{id}` | 👑 Admin | Delete agent |
-| PATCH | `/agents/bulk/status` | 👑 Admin | Bulk status update |
+|:---:|:---|:---:|:---|
+| `GET` | `/` | ❌ Public | API Gateway root health check returning service status, version, and documentation links. |
+| `GET` | `/health` | ❌ Public | Detailed system health status with live categorization of all available endpoints. |
+| `GET` | `/uploads/profile_photos/{filename}` | ❌ Public | Direct static file serving for uploaded user profile photos. |
 
 ---
 
 ## Tech Stack
 
-- **FastAPI** 0.115.5 — Web framework
-- **Motor** 3.6.0 — Async MongoDB driver  
-- **Pydantic v2** — Data validation
-- **PyJWT** — JSON Web Tokens
-- **bcrypt** — Password hashing
-- **python-dotenv** — Environment config
+- **FastAPI** 0.115.5 — High performance asynchronous web framework
+- **Motor** 3.6.0 — Asynchronous MongoDB driver for asyncio
+- **Pydantic v2** — Fast data validation and serialization
+- **PyJWT** — Cryptographically secure JSON Web Tokens
+- **bcrypt** — Strong password hashing with automatic salt generation
+- **python-dotenv** — Environment configuration manager
