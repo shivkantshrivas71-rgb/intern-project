@@ -12,10 +12,12 @@ Architecture:
 Startup:
     uvicorn main:app --reload
 """
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from database import create_db_indexes
@@ -44,6 +46,7 @@ async def lifespan(app: FastAPI):
     print(f"  Starting up... connecting to MongoDB")
     print(f"{'='*60}\n")
 
+    os.makedirs("uploads/profile_photos", exist_ok=True)
     await create_db_indexes()
 
     print(f"\n[Gateway] All modules loaded. API is ready.\n")
@@ -71,6 +74,10 @@ app = FastAPI(
 
 # ── Middlewares ───────────────────────────────────────────────────────────────
 setup_middlewares(app)
+
+# ── Static Files (Uploads / Profile Photos) ──────────────────────────────────
+os.makedirs("uploads/profile_photos", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # ── Register Module Routers ───────────────────────────────────────────────────
 app.include_router(users_router)    # /register, /login, /users/*, /admin/*
@@ -112,10 +119,13 @@ async def health_check():
                 "endpoints": [
                     "POST   /register",
                     "POST   /login",
-                    "POST   /smart-login",
+                    "POST   /logout",
+                    "POST   /refresh-token",
                     "GET    /users/me",
                     "PUT    /users/me",
                     "DELETE /users/me",
+                    "POST   /users/me/profile-photo",
+                    "DELETE /users/me/profile-photo",
                     "POST   /forgot-password",
                     "POST   /reset-password",
                     "GET    /admin/stats",

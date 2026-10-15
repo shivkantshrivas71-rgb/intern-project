@@ -21,6 +21,8 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, examples=["john_doe"])
     email: str = Field(..., examples=["user@example.com"])
     password: str = Field(..., min_length=6, examples=["StrongPassword123"])
+    mobile_number: str = Field(..., examples=["9876543210"])
+    gender: str = Field(..., examples=["male", "female", "other"])
 
     @field_validator("email")
     @classmethod
@@ -36,6 +38,22 @@ class UserCreate(BaseModel):
             raise ValueError("Username can only contain letters, numbers, and underscores")
         return v.lower().strip()
 
+    @field_validator("mobile_number")
+    @classmethod
+    def validate_mobile(cls, v: str) -> str:
+        clean_v = v.strip().replace(" ", "").replace("-", "")
+        if not re.match(r"^\+?[0-9]{10,15}$", clean_v):
+            raise ValueError("Invalid mobile number format. Must be 10-15 digits.")
+        return clean_v
+
+    @field_validator("gender")
+    @classmethod
+    def validate_gender(cls, v: str) -> str:
+        cleaned = v.strip().lower()
+        if cleaned not in ("male", "female", "other"):
+            raise ValueError("Gender must be 'male', 'female', or 'other'")
+        return cleaned
+
 
 class UserLogin(BaseModel):
     """Credentials required to log in."""
@@ -48,6 +66,8 @@ class UserUpdate(BaseModel):
     username: Optional[str] = Field(None, min_length=3, max_length=50, examples=["new_username"])
     email: Optional[str] = Field(None, examples=["new@example.com"])
     password: Optional[str] = Field(None, min_length=6, examples=["NewPassword123"])
+    mobile_number: Optional[str] = Field(None, examples=["9876543210"])
+    gender: Optional[str] = Field(None, examples=["male"])
 
     @field_validator("email")
     @classmethod
@@ -63,27 +83,25 @@ class UserUpdate(BaseModel):
             raise ValueError("Username can only contain letters, numbers, and underscores")
         return v.lower().strip() if v else v
 
-
-class SmartLoginRequest(BaseModel):
-    """
-    Request schema for the Smart Login/Register endpoint.
-    - Existing email → logs in directly using password
-    - New email      → requires a username to register and then log in
-    """
-    email: str = Field(..., examples=["user@example.com"])
-    password: str = Field(..., examples=["StrongPassword123"])
-    username: Optional[str] = Field(
-        None,
-        description="Required only when creating a new account",
-        examples=["john_doe"],
-    )
-
-    @field_validator("email")
+    @field_validator("mobile_number")
     @classmethod
-    def validate_email(cls, v: str) -> str:
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", v):
-            raise ValueError("Invalid email format")
-        return v.lower().strip()
+    def validate_mobile(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            clean_v = v.strip().replace(" ", "").replace("-", "")
+            if not re.match(r"^\+?[0-9]{10,15}$", clean_v):
+                raise ValueError("Invalid mobile number format. Must be 10-15 digits.")
+            return clean_v
+        return v
+
+    @field_validator("gender")
+    @classmethod
+    def validate_gender(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            cleaned = v.strip().lower()
+            if cleaned not in ("male", "female", "other"):
+                raise ValueError("Gender must be 'male', 'female', or 'other'")
+            return cleaned
+        return v
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -121,7 +139,10 @@ class UserResponse(BaseModel):
     id: Optional[ObjId] = Field(None, alias="_id")
     username: str
     email: Optional[str] = None
+    mobile_number: Optional[str] = None
+    gender: Optional[str] = None
     role: str = "user"
+    profile_photo: Optional[str] = None
     created_at: datetime.datetime
 
 
@@ -132,18 +153,22 @@ class AdminUserResponse(BaseModel):
     id: Optional[ObjId] = Field(None, alias="_id")
     username: str
     email: Optional[str] = None
+    mobile_number: Optional[str] = None
+    gender: Optional[str] = None
     role: str = "user"
+    profile_photo: Optional[str] = None
     created_at: datetime.datetime
 
 
 class Token(BaseModel):
-    """JWT token response returned after a successful login."""
+    """JWT token response returned after a successful login or refresh."""
     access_token: str
     token_type: str = "bearer"
+    message: Optional[str] = None
 
 
-class SmartLoginResponse(BaseModel):
-    """Response for the smart-login endpoint — indicates if a new account was created."""
-    access_token: str
-    token_type: str = "bearer"
-    is_new_user: bool = Field(..., description="True if a new account was created, False if an existing account was used")
+class ProfilePhotoResponse(BaseModel):
+    """Response returned when a profile photo is uploaded or removed."""
+    message: str
+    profile_photo: Optional[str] = None
+

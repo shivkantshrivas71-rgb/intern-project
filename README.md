@@ -53,12 +53,15 @@ uvicorn main:app --reload
 ### Auth & Users (`/`)
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/register` | ❌ | Register new user |
-| POST | `/login` | ❌ | Login → JWT token |
-| POST | `/smart-login` | ❌ | Login or Register in one step |
-| GET | `/users/me` | ✅ | Get my profile |
+| POST | `/register` | ❌ | Register new user (username, email, mobile_number, gender, password) |
+| POST | `/login` | ❌ | Login → JWT token (Rate limited: 5 attempts/min) |
+| POST | `/logout` | ✅ | Logout → blacklists token permanently |
+| POST | `/refresh-token` | ✅ | Renew token → revokes and blacklists old token |
+| GET | `/users/me` | ✅ | Get my profile (includes `profile_photo`) |
 | PUT | `/users/me` | ✅ | Update my profile |
 | DELETE | `/users/me` | ✅ | Delete my account |
+| POST | `/users/me/profile-photo` | ✅ | Upload/update profile photo (JPEG, PNG, WEBP, GIF, max 5MB) |
+| DELETE | `/users/me/profile-photo` | ✅ | Delete my profile photo |
 | POST | `/forgot-password` | ❌ | Request OTP |
 | POST | `/reset-password` | ❌ | Reset via OTP |
 | GET | `/admin/stats` | 👑 Admin | User statistics |

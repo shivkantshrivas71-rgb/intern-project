@@ -53,3 +53,50 @@ def verify_token(token: str) -> Optional[dict]:
         )
     except InvalidTokenError:
         return None
+
+
+async def blacklist_token(token: str, expires_at: Optional[datetime.datetime] = None) -> bool:
+    """
+    Store token in blacklisted_tokens collection so it cannot be used again.
+    Uses token expiration time for MongoDB TTL automatic cleanup.
+    """
+    from database import blacklisted_tokens_collection
+
+    if not expires_at:
+        payload = verify_token(token)
+        if payload and "exp" in payload:
+            expires_at = datetime.datetime.fromtimestamp(
+                payload["exp"], tz=datetime.timezone.utc
+            )
+        else:
+            expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+                minutes=settings.JWT_EXPIRATION_MINUTES
+            )
+
+    try:
+        await blacklisted_tokens_collection.update_one(
+            {"token": token},
+            {
+                "$set": {
+                    "token": token,
+                    "expires_at": expires_at,
+                    "blacklisted_at": datetime.datetime.now(datetime.timezone.utc),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as exc:
+        print(f"[Security] Error blacklisting token: {exc}")
+        return False
+
+
+async def is_token_blacklisted(token: str) -> bool:
+    """
+    Check if a token has been revoked / blacklisted.
+    Returns True if blacklisted, False otherwise.
+    """
+    from database import blacklisted_tokens_collection
+    doc = await blacklisted_tokens_collection.find_one({"token": token})
+    return doc is not None
+

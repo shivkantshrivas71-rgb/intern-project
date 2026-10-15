@@ -20,9 +20,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
-        # Skip CSP for documentation pages so Swagger UI can load CDN resources
-        if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
-            response.headers["Content-Security-Policy"] = "default-src 'self'"
+        # Skip CSP for docs and static upload assets
+        if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json", "/uploads")):
+            response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: blob:;"
         return response
 
 

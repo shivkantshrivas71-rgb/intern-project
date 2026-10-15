@@ -5,27 +5,37 @@ All User and Admin endpoints are defined here.
 The existing login, register, smart-login, and OTP flow is fully preserved.
 """
 import datetime
+import os
 import random
 import smtplib
+import uuid
 from email.mime.text import MIMEText
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials
 
 from config import settings
 from database import users_collection
-from security import hash_password, verify_password, create_access_token
+from security import hash_password, verify_password, create_access_token, blacklist_token
 from core.helpers import serialize_doc
+from core.rate_limiter import login_rate_limiter
 
-from modules.auth.auth import get_current_user, get_admin_user
+from modules.auth.auth import get_current_user, get_admin_user, _bearer_scheme
 from modules.users.schemas import (
     UserCreate, UserLogin, UserUpdate, UserResponse,
-    SmartLoginRequest, SmartLoginResponse,
     ForgotPasswordRequest, VerifyOTPRequest,
     AdminUserResponse, RoleUpdateRequest, Token,
+    ProfilePhotoResponse,
 )
 
 router = APIRouter()
+
+# ── Upload Configurations ─────────────────────────────────────────────────────
+UPLOAD_DIR = os.path.join(os.getcwd(), "uploads", "profile_photos")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg"}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,12 +65,15 @@ def _build_user_response(user: dict) -> dict:
     """
     Convert a MongoDB user document to a safe response dictionary.
     Removes sensitive fields: password, access_token, reset_otp, otp_expiry.
+    Ensures profile_photo is present.
     """
     doc = serialize_doc(user)
     doc.pop("password", None)
     doc.pop("access_token", None)
     doc.pop("reset_otp", None)
     doc.pop("otp_expiry", None)
+    if "profile_photo" not in doc:
+        doc["profile_photo"] = None
     return doc
 
 
@@ -78,8 +91,9 @@ async def register(user_data: UserCreate):
     """
     Create a new user account.
 
-    - **If the email is already registered** → returns a token if the password matches
     - **If the username already exists** → returns a 400 error
+    - **If the mobile number already exists** → returns a 400 error
+    - **If the email is already registered** → returns a token if the password matches
     - **New user** → creates the account and returns 201
     """
     # Check username uniqueness
@@ -87,6 +101,13 @@ async def register(user_data: UserCreate):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already exists. Please choose another.",
+        )
+
+    # Check mobile number uniqueness
+    if await users_collection.find_one({"mobile_number": user_data.mobile_number}):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mobile number already registered. Please choose another.",
         )
 
     # If email is already registered, attempt auto-login
@@ -115,6 +136,8 @@ async def register(user_data: UserCreate):
     user_doc = {
         "username": user_data.username,
         "email": user_data.email,
+        "mobile_number": user_data.mobile_number,
+        "gender": user_data.gender,
         "password": hash_password(user_data.password),
         "role": "user",
         "created_at": now,
@@ -128,12 +151,17 @@ async def register(user_data: UserCreate):
     "/login",
     response_model=Token,
     tags=["Auth"],
-    summary="Login and get JWT access token",
+    summary="Login and get JWT access token (Rate limited: 5 attempts/min)",
+    dependencies=[Depends(login_rate_limiter)],
 )
-async def login(login_data: UserLogin):
+async def login(login_data: UserLogin, request: Request):
     """
     Authenticate with email and password.
     Returns a JWT Bearer token on success.
+
+    Rate Limit:
+    - Maximum 5 attempts per 1 minute.
+    - Exceeding attempts results in HTTP 429 Too Many Requests.
     """
     user = await users_collection.find_one({"email": login_data.email})
     if not user or not verify_password(login_data.password, user["password"]):
@@ -141,65 +169,73 @@ async def login(login_data: UserLogin):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
         )
+
+    # Clear rate limit attempts for this client IP upon successful login
+    client_ip = login_rate_limiter.get_client_ip(request)
+    login_rate_limiter.reset(f"login:{client_ip}")
+
     token = create_access_token(data={"sub": user["username"]})
     await users_collection.update_one(
         {"_id": user["_id"]}, {"$set": {"access_token": token}}
     )
-    return {"access_token": token, "token_type": "bearer"}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "message": "Login successful.",
+    }
 
 
 @router.post(
-    "/smart-login",
-    response_model=SmartLoginResponse,
+    "/logout",
     tags=["Auth"],
-    summary="Smart Login/Register — single endpoint",
+    summary="Logout and blacklist current token",
 )
-async def smart_login(data: SmartLoginRequest):
+async def logout(
+    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+):
     """
-    Smart Login/Register endpoint:
-    - **Registered email** → logs in directly using the password
-    - **New email** → requires a username; registers the account and then logs in
+    Invalidate the current user's session and blacklist the token
+    so it cannot be used again.
     """
-    existing = await users_collection.find_one({"email": data.email})
+    token = credentials.credentials
+    await blacklist_token(token)
+    await users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$unset": {"access_token": ""}},
+    )
+    return {
+        "message": "Logged out successfully. Token has been revoked and cannot be reused."
+    }
 
-    if existing:
-        # Existing user — log in
-        if not verify_password(data.password, existing["password"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect password. Please enter the correct password.",
-            )
-        token = create_access_token(data={"sub": existing["username"]})
-        await users_collection.update_one(
-            {"_id": existing["_id"]}, {"$set": {"access_token": token}}
-        )
-        return {"access_token": token, "token_type": "bearer", "is_new_user": False}
-    else:
-        # New user — register then log in
-        if not data.username:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="A 'username' is required to create a new account.",
-            )
-        if await users_collection.find_one({"username": data.username}):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This username is already taken. Please choose another.",
-            )
-        now = datetime.datetime.now(datetime.timezone.utc)
-        user_doc = {
-            "username": data.username,
-            "email": data.email,
-            "password": hash_password(data.password),
-            "role": "user",
-            "created_at": now,
-        }
-        await users_collection.insert_one(user_doc)
-        token = create_access_token(data={"sub": data.username})
-        await users_collection.update_one(
-            {"email": data.email}, {"$set": {"access_token": token}}
-        )
-        return {"access_token": token, "token_type": "bearer", "is_new_user": True}
+
+@router.post(
+    "/refresh-token",
+    response_model=Token,
+    tags=["Auth"],
+    summary="Renew access token (Blacklists old token)",
+)
+async def refresh_token(
+    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+):
+    """
+    Renew the authenticated user's access token.
+    The previous token is immediately blacklisted and cannot be reused.
+    """
+    old_token = credentials.credentials
+    await blacklist_token(old_token)
+
+    new_token = create_access_token(data={"sub": current_user["username"]})
+    await users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$set": {"access_token": new_token}},
+    )
+    return {
+        "access_token": new_token,
+        "token_type": "bearer",
+        "message": "Token renewed successfully. Previous token has been revoked.",
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,7 +261,7 @@ async def update_my_profile(
     user_update: UserUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update the currently authenticated user's username, email, or password."""
+    """Update the currently authenticated user's profile."""
     update_data: dict = {}
 
     if user_update.username:
@@ -250,6 +286,20 @@ async def update_my_profile(
             )
         update_data["email"] = user_update.email
 
+    if user_update.mobile_number:
+        conflict = await users_collection.find_one(
+            {"mobile_number": user_update.mobile_number, "_id": {"$ne": current_user["_id"]}}
+        )
+        if conflict:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Mobile number already taken.",
+            )
+        update_data["mobile_number"] = user_update.mobile_number
+
+    if user_update.gender:
+        update_data["gender"] = user_update.gender
+
     if user_update.password:
         update_data["password"] = hash_password(user_update.password)
 
@@ -259,16 +309,111 @@ async def update_my_profile(
             detail="No data provided to update.",
         )
 
-    # Issue a new token so the old token is invalidated after a username change
-    new_username = update_data.get("username", current_user["username"])
-    new_token = create_access_token(data={"sub": new_username})
-    update_data["access_token"] = new_token
+    # If username changed, issue a new token and blacklist the old one
+    if "username" in update_data:
+        old_token = current_user.get("access_token")
+        if old_token:
+            await blacklist_token(old_token)
+        new_token = create_access_token(data={"sub": update_data["username"]})
+        update_data["access_token"] = new_token
 
     await users_collection.update_one(
         {"_id": current_user["_id"]}, {"$set": update_data}
     )
     updated = await users_collection.find_one({"_id": current_user["_id"]})
     return _build_user_response(updated)
+
+
+@router.post(
+    "/users/me/profile-photo",
+    response_model=ProfilePhotoResponse,
+    tags=["Users"],
+    summary="Upload or update user profile photo",
+)
+async def upload_profile_photo(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Upload or update the authenticated user's profile photo.
+    - Supported formats: JPEG, PNG, WEBP, GIF
+    - Maximum file size: 5 MB
+    """
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported image type '{file.content_type}'. Allowed formats: JPEG, PNG, WEBP, GIF.",
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File size exceeds maximum limit of 5 MB.",
+        )
+
+    # Determine file extension safely
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if not ext or ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg" if file.content_type in ("image/jpeg", "image/jpg") else ".png"
+
+    filename = f"{current_user['username']}_{uuid.uuid4().hex[:8]}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    # Remove previous uploaded photo file if present locally
+    old_photo = current_user.get("profile_photo")
+    if old_photo and old_photo.startswith("/uploads/profile_photos/"):
+        old_filename = os.path.basename(old_photo)
+        old_file_path = os.path.join(UPLOAD_DIR, old_filename)
+        if os.path.exists(old_file_path):
+            try:
+                os.remove(old_file_path)
+            except Exception as exc:
+                print(f"[Upload Warning] Could not remove old photo: {exc}")
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    photo_url = f"/uploads/profile_photos/{filename}"
+    await users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$set": {"profile_photo": photo_url}},
+    )
+
+    return {
+        "message": "Profile photo uploaded successfully.",
+        "profile_photo": photo_url,
+    }
+
+
+@router.delete(
+    "/users/me/profile-photo",
+    tags=["Users"],
+    summary="Delete user profile photo",
+)
+async def delete_profile_photo(current_user: dict = Depends(get_current_user)):
+    """Remove the authenticated user's profile photo and delete file from storage."""
+    old_photo = current_user.get("profile_photo")
+    if not old_photo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No profile photo to delete.",
+        )
+
+    if old_photo.startswith("/uploads/profile_photos/"):
+        old_filename = os.path.basename(old_photo)
+        old_file_path = os.path.join(UPLOAD_DIR, old_filename)
+        if os.path.exists(old_file_path):
+            try:
+                os.remove(old_file_path)
+            except Exception as exc:
+                print(f"[Delete Photo Warning] Could not remove photo file: {exc}")
+
+    await users_collection.update_one(
+        {"_id": current_user["_id"]},
+        {"$unset": {"profile_photo": ""}},
+    )
+    return {"message": "Profile photo removed successfully."}
 
 
 @router.delete(

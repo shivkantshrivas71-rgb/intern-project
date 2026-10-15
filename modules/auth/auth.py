@@ -12,7 +12,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from database import users_collection
-from security import verify_token
+from security import verify_token, is_token_blacklisted
 
 # ── Bearer Token Scheme ───────────────────────────────────────────────────────
 _bearer_scheme = HTTPBearer()
@@ -29,11 +29,12 @@ async def get_current_user(
     Steps:
     1. Extract the Bearer token from the Authorization header
     2. Verify the JWT signature and expiry
-    3. Look up the user in the database
-    4. Validate the active session token (single-device session control)
+    3. Check if the token has been revoked / blacklisted
+    4. Look up the user in the database
+    5. Validate the active session token (single-device session control)
 
     Returns: The full user document (dict) from MongoDB.
-    Raises:  401 if the token is invalid or expired, 404 if the user is not found.
+    Raises:  401 if the token is invalid, expired, or revoked; 404 if user not found.
     """
     token = credentials.credentials
 
@@ -43,6 +44,14 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Step 2: Check if the token has been blacklisted / revoked
+    if await is_token_blacklisted(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked or logged out. Please login again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
